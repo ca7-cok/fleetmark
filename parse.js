@@ -298,12 +298,18 @@ function trimAutolink(raw) {
       const m = /&[A-Za-z0-9]+;$/.exec(s);
       s = m ? s.slice(0, s.length - m[0].length) : s.slice(0, -1);
     }
-    let open = 0, close = 0;
-    for (let k = 0; k < s.length; k++) {
-      if (s[k] === '(') open++;
-      else if (s[k] === ')') close++;
+    // a trailing ')' is dropped only when it has no matching '('
+    while (s.endsWith(')')) {
+      let depth = 0;
+      let matched = false;
+      for (let k = 0; k < s.length - 1; k++) {
+        if (s[k] === '(') depth++;
+        else if (s[k] === ')') { if (depth > 0) depth--; }
+      }
+      matched = depth > 0;
+      if (matched) break;
+      s = s.slice(0, -1);
     }
-    while (close > open && s.endsWith(')')) { s = s.slice(0, -1); close--; }
     if (s === before) return s;
   }
 }
