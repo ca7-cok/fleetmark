@@ -47,7 +47,7 @@ function decodeNumericRef(cp) {
 }
 
 const ASCII_PUNCT = new Set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~');
-const UNICODE_PUNCT = /\p{P}/u;
+const UNICODE_PUNCT = /[\p{P}\p{S}]/u;
 function isPunctChar(ch) {
   return ch !== undefined && (ASCII_PUNCT.has(ch) || UNICODE_PUNCT.test(ch));
 }
@@ -648,10 +648,10 @@ function parseInline(src, ctx) {
       if (html !== null) {
         flushText();
         nodes.push({ k: 'html', s: html });
-        // an <a> element suppresses autolink literals until its </a>,
-        // and that state carries across blocks within one document
-        if (/^<a(?=[\s/>])/i.test(html)) ctx.inLink = true;
-        else if (/^<\/a\s*>/i.test(html)) ctx.inLink = false;
+        // an <a ...> tag (literally "<a" + a space) suppresses autolink
+        // literals until an exact </a>, across blocks within one document
+        if (/^<a /i.test(html)) ctx.inLink = true;
+        else if (/^<\/a>/i.test(html)) ctx.inLink = false;
         i += html.length;
         continue;
       }
@@ -1035,7 +1035,7 @@ function tryDef(lines, i, ctx) {
 function splitRow(line) {
   const cells = [];
   let cur = '';
-  let inCode = 0; // backtick run length of the open code span, 0 = outside
+  let spanUntil = -1; // index just past the end of an open code span
   let i = 0;
   while (i < line.length) {
     const c = line[i];
@@ -1046,16 +1046,27 @@ function splitRow(line) {
       i += 2;
       continue;
     }
-    if (c === '`') {
+    if (c === '`' && i >= spanUntil) {
       let run = 0;
       while (line[i + run] === '`') run++;
+      // a span only shields pipes when a run of exactly the same length
+      // closes it later in the row; otherwise the backticks are literal
+      let j = i + run;
+      let closeEnd = -1;
+      while (j < line.length) {
+        if (line[j] === '`') {
+          let r2 = 0;
+          while (line[j + r2] === '`') r2++;
+          if (r2 === run) { closeEnd = j + r2; break; }
+          j += r2;
+        } else j++;
+      }
       cur += '`'.repeat(run);
-      if (inCode === 0) inCode = run;
-      else if (run === inCode) inCode = 0;
+      if (closeEnd >= 0) spanUntil = closeEnd;
       i += run;
       continue;
     }
-    if (c === '|' && inCode === 0) { cells.push(cur); cur = ''; i++; continue; }
+    if (c === '|' && i >= spanUntil) { cells.push(cur); cur = ''; i++; continue; }
     cur += c;
     i++;
   }
