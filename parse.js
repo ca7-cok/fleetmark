@@ -436,7 +436,20 @@ function charAfter(inner, idx) {
   return null;
 }
 
-function pairRejectedByMarked(inner, use, ch) {
+function hasBadNested(inner, use) {
+  const nestedK = use === 1 ? 'strong' : 'em';
+  for (let idx = 0; idx < inner.length; idx++) {
+    if (inner[idx].k !== nestedK) continue;
+    const prevCh = charBefore(inner, idx);
+    const nextCh = charAfter(inner, idx);
+    if ((prevCh === null || /\s/.test(prevCh)) && nextCh !== null && WORD_CHAR.test(nextCh)) return true;
+  }
+  return false;
+}
+
+function pairRejectedByMarked(inner, use, ch, closerLen) {
+  // with a bad nested pair, a closer run of 3+ still forms the pair
+  if (closerLen >= 3) return false;
   const nestedK = use === 1 ? 'strong' : 'em';
   for (let idx = 0; idx < inner.length; idx++) {
     if (inner[idx].k !== nestedK) continue;
@@ -446,6 +459,7 @@ function pairRejectedByMarked(inner, use, ch) {
     const nextBad = nextCh !== null && WORD_CHAR.test(nextCh);
     if (!prevBad || !nextBad) continue;
     let rescued = false;
+    if (use === 1) return true;
     for (let j = idx + 1; j < inner.length; j++) {
       if (inner[j].k === 'delim' && inner[j].ch === ch && inner[j].len > 0) {
         const pc = charBefore(inner, j);
@@ -479,7 +493,7 @@ function processEmphasis(nodes, delims) {
           const u = o.len >= 2 && closer.len >= 2 ? 2 : 1;
           const na = nodes.indexOf(o);
           const nb = nodes.indexOf(closer);
-          if (pairRejectedByMarked(nodes.slice(na + 1, nb), u, o.ch)) continue;
+          if (pairRejectedByMarked(nodes.slice(na + 1, nb), u, o.ch, closer.len)) continue;
         }
         oi = k; break;
       }
@@ -493,6 +507,12 @@ function processEmphasis(nodes, delims) {
       const b = nodes.indexOf(closer);
       const inner = nodes.splice(a + 1, b - a - 1);
       const kind = opener.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
+      // when a pair whose content holds a bad nested pair closes with
+      // delimiters to spare, marked renders the spare delimiters inside
+      if (closer.len - use > 0 && hasBadNested(inner, use)) {
+        inner.push({ k: 'delim', ch: closer.ch, len: closer.len - use, canOpen: false, canClose: false });
+        closer.len = use;
+      }
       nodes.splice(a + 1, 0, { k: kind, kids: inner });
       opener.len -= use;
       closer.len -= use;
