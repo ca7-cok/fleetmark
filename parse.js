@@ -1296,10 +1296,13 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
   const tokens = [];
   let i = 0;
   let blankBefore = false;
+  let deepSplitNext = false;
   const n = lines.length;
   while (i < n) {
     const line = lines[i];
     if (isBlankLine(line)) { blankBefore = true; i++; continue; }
+    const applyDeep = deepSplitNext;
+    deepSplitNext = false;
     let res = null;
     // fenced code
     const fence = matchFenceStart(line);
@@ -1368,9 +1371,20 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
       const buf = [line];
       let j = i + 1;
       let heading = null;
+      let sawDeep = false;
       while (j < n) {
         const l = lines[j];
         if (isBlankLine(l)) break;
+        // inside a list item, a continuation line indented 4+ columns is
+        // folded into the paragraph with those 4 columns removed, and a
+        // shallower line after such a deep line ends the paragraph
+        if (inItem && indentCols(l) >= 4) {
+          buf.push(sliceColX(l, 4));
+          sawDeep = true;
+          j++;
+          continue;
+        }
+        if (inItem && sawDeep) break;
         const sx = setextLevel(l);
         if (sx) { heading = sx; j++; break; }
         if (interruptsParagraph(l, inItem)) break;
@@ -1383,9 +1397,11 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
       } else {
         res = [{ type: 'para', text: buf.join('\n') }, j];
       }
+      if (sawDeep && j < n && !isBlankLine(lines[j])) deepSplitNext = true;
     }
     res[0].blankBefore = blankBefore;
     blankBefore = false;
+    if (applyDeep) res[0].deepSplit = true;
     tokens.push(res[0]);
     i = res[1];
   }
@@ -1473,6 +1489,7 @@ function renderItem(item, tight, ctx) {
         ? box + parseInline(restText, ctx)
         : '<p>' + box + parseInline(restText, ctx) + '</p>\n';
     } else {
+      if (tight && toks[k].deepSplit && k > 0) out += '\n\n';
       out += renderBlock(toks[k], ctx, tight);
     }
   }
