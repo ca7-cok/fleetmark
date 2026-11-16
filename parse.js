@@ -290,27 +290,15 @@ function matchRawHtml(s, i) {
 const LOCAL_PART = new Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-");
 
 function trimAutolink(raw) {
+  // marked's backpedal, repeated to a fixpoint: keep the longest prefix
+  // built from plain runs, balanced (...) groups, ampersands that do
+  // not start a trailing entity, and punctuation runs not at the end
   let s = raw;
   for (;;) {
-    const before = s;
-    s = s.replace(/[?!.,:*_~'"]+$/, '');
-    if (s.endsWith(';')) {
-      const m = /&[A-Za-z0-9]+;$/.exec(s);
-      s = m ? s.slice(0, s.length - m[0].length) : s.slice(0, -1);
-    }
-    // a trailing ')' is dropped only when it has no matching '('
-    while (s.endsWith(')')) {
-      let depth = 0;
-      let matched = false;
-      for (let k = 0; k < s.length - 1; k++) {
-        if (s[k] === '(') depth++;
-        else if (s[k] === ')') { if (depth > 0) depth--; }
-      }
-      matched = depth > 0;
-      if (matched) break;
-      s = s.slice(0, -1);
-    }
-    if (s === before) return s;
+    const m = /^(?:[^?!.,:;*_'"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'"~)]+(?!$))+/.exec(s);
+    const t = m ? m[0] : '';
+    if (t === s) return s;
+    s = t;
   }
 }
 
