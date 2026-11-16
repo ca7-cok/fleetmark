@@ -82,15 +82,14 @@ function indentCols(line) {
  *  of the line byte-for-byte (a straddling tab leaves spaces behind). Used
  *  for literal content: code blocks and fence bodies. */
 function sliceCol(line, target) {
+  // consume characters whose starting column is before the target; a
+  // tab that starts before the target is consumed whole
   let col = 0, i = 0;
   while (i < line.length && col < target) {
     const c = line[i];
     if (c === ' ') { col++; i++; }
-    else if (c === '\t') {
-      const step = 4 - (col % 4);
-      if (col + step > target) return ' '.repeat(col + step - target) + line.slice(i + 1);
-      col += step; i++;
-    } else break;
+    else if (c === '\t') { col += 4 - (col % 4); i++; }
+    else break;
   }
   return line.slice(i);
 }
@@ -487,9 +486,9 @@ function renderNodes(nodes, ctx) {
   return out;
 }
 
-/** Parse inline markup in `src` and return HTML. `ctx.defs` maps normalized
- *  reference labels to {dest, title}. */
-function parseInline(src, ctx) {
+/** Lex inline markup in `src` into a node list. `ctx.defs` maps
+ *  normalized reference labels to {dest, title}. */
+function lexInline(src, ctx) {
   const nodes = [];
   const delims = [];
   const brackets = [];
@@ -593,6 +592,51 @@ function parseInline(src, ctx) {
     if (def) { formLink(bi, op, def.dest, def.title, i + 1); return true; }
     brackets.splice(bi, 1);
     return false;
+  }
+
+  // Find the ']' matching the bracket opened just before `from`, counting
+  // nested brackets and skipping escapes, code spans and link destinations.
+  function scanBalanced(from) {
+    let depth = 1;
+    let j = from;
+    while (j < n) {
+      const cj = src[j];
+      if (cj === '\\' && isAsciiPunct(src[j + 1])) { j += 2; continue; }
+      if (cj === '`') {
+        let len = 0;
+        while (src[j + len] === '`') len++;
+        let k = j + len;
+        let closeAt = -1;
+        while (k < n) {
+          if (src[k] === '`') {
+            let run = 0;
+            while (src[k + run] === '`') run++;
+            if (run === len) { closeAt = k; break; }
+            k += run;
+          } else k++;
+        }
+        j = closeAt >= 0 ? closeAt + len : j + len;
+        continue;
+      }
+      if (cj === '[') { depth++; j++; continue; }
+      if (cj === ']') {
+        depth--;
+        j++;
+        if (depth === 0) return j - 1;
+        if (src[j] === '(') {
+          const r = parseLinkParens(src, j + 1);
+          if (r) j = r.end;
+        }
+        continue;
+      }
+      j++;
+    }
+    return -1;
+  }
+
+  function pushImage(textStr, dest, title) {
+    flushText();
+    nodes.push({ k: 'img', src: sanitizeUrl(dest, true), title, kids: lexInline(textStr, ctx) });
   }
 
   while (i < n) {
@@ -699,6 +743,30 @@ function parseInline(src, ctx) {
       continue;
     }
     if (c === '!' && src[i + 1] === '[') {
+      // an image captures its text by balanced-bracket scanning, so a
+      // link nested inside the alt text cannot close the image early
+      const close = scanBalanced(i + 2);
+      if (close >= 0) {
+        const textStr = src.slice(i + 2, close);
+        let done = false;
+        if (src[close + 1] === '(') {
+          const r = parseLinkParens(src, close + 2);
+          if (r) { pushImage(textStr, r.dest, r.title); i = r.end; done = true; }
+        }
+        if (!done && src[close + 1] === '[') {
+          const second = parseRefLabel(src, close + 1);
+          if (second) {
+            const label = second.text !== '' ? second.text : textStr;
+            const def = ctx.defs.get(normalizeLabel(label));
+            if (def) { pushImage(textStr, def.dest, def.title); i = second.end; done = true; }
+          }
+        }
+        if (!done) {
+          const def = ctx.defs.get(normalizeLabel(textStr));
+          if (def) { pushImage(textStr, def.dest, def.title); i = close + 1; done = true; }
+        }
+        if (done) continue;
+      }
       flushText();
       const node = { k: 'open', img: true };
       nodes.push(node);
@@ -786,7 +854,11 @@ function parseInline(src, ctx) {
   }
   flushText();
   processEmphasis(nodes, delims);
-  return renderNodes(nodes, ctx);
+  return nodes;
+}
+
+function parseInline(src, ctx) {
+  return renderNodes(lexInline(src, ctx), ctx);
 }
 
 // ------------------------------------------------------------------- blocks
@@ -1383,7 +1455,12 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
         }
         const consumed = lines.slice(i, j);
         let text = consumed.join('\n');
-        if ((j < n && !isBlankLine(lines[j])) || (j >= n && eolAtEnd)) text += '\n';
+        // types 1-5 keep the newline unless the next line is truly
+        // empty; types 6-7 unless it is blank
+        const nl = hb.type <= 5
+          ? (j < n ? lines[j] !== '' : eolAtEnd)
+          : (j < n ? !isBlankLine(lines[j]) : eolAtEnd);
+        if (nl) text += '\n';
         res = [{ type: 'html', text }, j];
       }
     }
