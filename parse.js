@@ -310,7 +310,7 @@ function trimAutolink(raw) {
 }
 
 /** Parse an email address at i (no prefix). Returns end index or -1. */
-function parseEmailAt(s, i) {
+function parseEmailAt(s, i, delims) {
   let j = i;
   while (j < s.length && LOCAL_PART.has(s[j])) j++;
   if (j === i || s[j] !== '@') return -1;
@@ -331,12 +331,19 @@ function parseEmailAt(s, i) {
   }
   if (labels < 2) return -1;
   const next = s[j];
-  if (next !== undefined && /[A-Za-z0-9_-]/.test(next)) return -1;
+  if (next !== undefined && /[A-Za-z0-9-]/.test(next)) return -1;
+  if (next === '_') {
+    // a run of 2+ underscores can be an emphasis boundary instead of part
+    // of the address, but only when a '_' delimiter is actually open
+    let run = 0;
+    while (s[j + run] === '_') run++;
+    if (run < 2 || !delims || !delims.some(d => d.ch === '_')) return -1;
+  }
   return j;
 }
 
 /** Try a GFM autolink literal at position i. Returns {href, text, end}. */
-function matchAutolinkLiteral(s, i) {
+function matchAutolinkLiteral(s, i, delims) {
   const prev = i === 0 ? undefined : s[i - 1];
   // www. and http(s):// links (the scheme matches case-insensitively,
   // and the original case is preserved in the output)
@@ -360,7 +367,7 @@ function matchAutolinkLiteral(s, i) {
   if (lower.startsWith('mailto:') || lower.startsWith('xmpp:')) {
     const pfx = lower.startsWith('mailto:') ? 7 : 5;
     if (prev !== undefined && LOCAL_PART.has(prev)) return null;
-    let end = parseEmailAt(s, i + pfx);
+    let end = parseEmailAt(s, i + pfx, delims);
     if (end < 0) return null;
     if (pfx === 5 && s[end] === '/') {
       // xmpp resource part: one segment of [A-Za-z0-9@._~-]
@@ -373,7 +380,7 @@ function matchAutolinkLiteral(s, i) {
   }
   // bare email
   if (prev === undefined || !LOCAL_PART.has(prev)) {
-    const end = parseEmailAt(s, i);
+    const end = parseEmailAt(s, i, delims);
     if (end > 0) {
       const text = s.slice(i, end);
       return { href: 'mailto:' + text, text, end };
@@ -638,7 +645,16 @@ function parseInline(src, ctx) {
         continue;
       }
       const html = matchRawHtml(src, i);
-      if (html !== null) { flushText(); nodes.push({ k: 'html', s: html }); i += html.length; continue; }
+      if (html !== null) {
+        flushText();
+        nodes.push({ k: 'html', s: html });
+        // an <a> element suppresses autolink literals until its </a>,
+        // and that state carries across blocks within one document
+        if (/^<a(?=[\s/>])/i.test(html)) ctx.inLink = true;
+        else if (/^<\/a\s*>/i.test(html)) ctx.inLink = false;
+        i += html.length;
+        continue;
+      }
       text += c; i++;
       continue;
     }
@@ -720,7 +736,7 @@ function parseInline(src, ctx) {
     const mm = TEXT_STOP_RE.exec(src);
     const j = mm ? mm.index : n;
     if (j === i) {
-      let auto = matchAutolinkLiteral(src, i);
+      let auto = ctx.inLink ? null : matchAutolinkLiteral(src, i, delims);
       if (auto && brackets.length) {
         const rb = src.indexOf(']', i);
         if (rb >= i && rb < auto.end && wouldFormLink(rb)) auto = null;
@@ -1456,7 +1472,7 @@ export function parse(markdown) {
   const eolAtEnd = src.endsWith('\n');
   const lines = src.split('\n');
   if (eolAtEnd) lines.pop();
-  const ctx = { defs: new Map() };
+  const ctx = { defs: new Map(), inLink: false };
   const tokens = lexLines(lines, ctx, eolAtEnd);
   let out = '';
   for (const t of tokens) out += renderBlock(t, ctx, false);
