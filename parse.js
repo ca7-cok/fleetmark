@@ -589,42 +589,62 @@ function renderNodes(nodes, ctx) {
  *  paired code span (and every escaped punctuation mark) hidden as '+'. */
 function apocMask(src) {
   const n = src.length;
-  const masked = src.split('');
+  // all maximal backtick runs, collected in one pass
+  const runs = [];
+  for (let k = 0; k < n;) {
+    if (src[k] === '`') {
+      let len = 0;
+      while (src[k + len] === '`') len++;
+      runs.push([k, len]);
+      k += len;
+    } else k++;
+  }
+  // walk escapes and runs in order; a run pairs with the next run of
+  // the same length, and the backticks of the runs inside a pair (and
+  // of each escape) are masked. `intervals` stays sorted throughout.
+  const intervals = [];
+  let ri = 0;
   let i = 0;
   while (i < n) {
-    const c = src[i];
-    if (c === '\\' && i + 1 < n && isPunctChar(src[i + 1])) {
-      masked[i] = '+';
-      masked[i + 1] = '+';
-      i += 2;
+    while (ri < runs.length && runs[ri][0] + runs[ri][1] <= i) ri++;
+    let runStart = -1, runLen = 0;
+    if (ri < runs.length) {
+      const [rs, rl] = runs[ri];
+      runStart = Math.max(rs, i);
+      runLen = rs + rl - runStart;
+    }
+    if (runStart >= 0 && runStart === i) {
+      let partner = -1;
+      for (let q = ri + 1; q < runs.length; q++) {
+        if (runs[q][1] === runLen) { partner = q; break; }
+      }
+      if (partner < 0) { i = runStart + runLen; ri++; continue; }
+      for (let q = ri + 1; q < partner; q++) intervals.push(runs[q]);
+      i = runs[partner][0] + runs[partner][1];
+      ri = partner + 1;
       continue;
     }
-    if (c === '`') {
-      let len = 0;
-      while (src[i + len] === '`') len++;
-      let j = i + len;
-      let closeEnd = -1;
-      while (j < n) {
-        if (src[j] === '`') {
-          let run = 0;
-          while (src[j + run] === '`') run++;
-          if (run === len) { closeEnd = j + run; break; }
-          j += run;
-        } else j++;
-      }
-      if (closeEnd >= 0) {
-        for (let k = i + len; k < closeEnd - len; k++) {
-          if (masked[k] === '`') masked[k] = '+';
-        }
-        i = closeEnd;
-      } else {
-        i += len;
-      }
+    const bs = src.indexOf('\\', i);
+    if (bs < 0 || (runStart >= 0 && runStart < bs)) {
+      if (runStart < 0) break;
+      i = runStart;
       continue;
     }
-    i++;
+    if (bs + 1 < n && isPunctChar(src[bs + 1])) {
+      intervals.push([bs, 2]);
+      i = bs + 2;
+    } else {
+      i = bs + 1;
+    }
   }
-  return masked.join('');
+  if (intervals.length === 0) return src;
+  let out = '';
+  let pos = 0;
+  for (const [s, len] of intervals) {
+    out += src.slice(pos, s) + '+'.repeat(len);
+    pos = s + len;
+  }
+  return out + src.slice(pos);
 }
 
 /** A code span in the masked text: a backtick run, backtick-free
@@ -737,8 +757,10 @@ function lexInline(src, ctx) {
   const nodes = [];
   const delims = [];
   const brackets = [];
-  const deadZones = computeDeadZones(src);
-  const inDeadZone = (pos) => zoneHas(deadZones, pos);
+  // dead zones are only consulted for delimiter runs at the end of
+  // the scan, so compute them lazily (many fragments have no delims)
+  let deadZones = null;
+  const inDeadZone = (pos) => zoneHas(deadZones ??= computeDeadZones(src), pos);
   let text = '';
   let i = 0;
   const n = src.length;
@@ -1196,7 +1218,7 @@ function lexInline(src, ctx) {
   }
   flushText();
   // delimiter runs inside a dead zone are literal text
-  if (deadZones.length) {
+  if (delims.length && (deadZones ??= computeDeadZones(src)).length) {
     for (let k = delims.length - 1; k >= 0; k--) {
       const d = delims[k];
       if (inDeadZone(d.pos)) {
