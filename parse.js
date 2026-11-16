@@ -1463,7 +1463,9 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
       const content = [];
       let j = i + 1;
       while (j < n && !isFenceClose(lines[j], fence.ch, fence.len)) {
-        content.push(sliceCol(lines[j], fence.indent));
+        // marked strips the fence line's indent from the content of
+        // backtick fences only; tilde fence content is kept verbatim
+        content.push(fence.ch === '`' ? sliceCol(lines[j], fence.indent) : lines[j]);
         j++;
       }
       if (j < n) j++; // consume the closing fence
