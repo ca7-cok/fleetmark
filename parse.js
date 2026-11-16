@@ -616,6 +616,37 @@ function parseInline(src, ctx) {
           j += run;
         } else j++;
       }
+      if (closeAt >= 0 && brackets.length > 0) {
+        // inside link text: find where the bracket would close
+        let bracketEnd = -1;
+        let depth = 0;
+        for (let k = i + len; k < n; k++) {
+          const ck = src[k];
+          if (ck === '\\' && isAsciiPunct(src[k + 1])) { k++; continue; }
+          if (ck === '[') depth++;
+          else if (ck === ']') {
+            if (depth === 0) { bracketEnd = k; break; }
+            depth--;
+          }
+        }
+        if (bracketEnd >= 0 && closeAt > bracketEnd &&
+            src.slice(i + len, closeAt).includes('`')) {
+          // a span whose content itself contains backticks does not
+          // shield the bracket; a short backtick-free run is plain text
+          const open = Math.min(len, 2);
+          let k = i + open;
+          while (k < n && src[k] !== '`') k++;
+          if (k < n) {
+            let run = 0;
+            while (src[k + run] === '`') run++;
+            const end = k + Math.min(run, 2);
+            text += src.slice(i, end);
+            i = end;
+            continue;
+          }
+          closeAt = -1;
+        }
+      }
       if (closeAt < 0) { text += '`'.repeat(len); i += len; continue; }
       flushText();
       let content = src.slice(i + len, closeAt).replace(/\n/g, ' ');
