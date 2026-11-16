@@ -574,6 +574,38 @@ function lexInline(src, ctx) {
     return ctx.defs.has(normalizeLabel(src.slice(op.contentStart, rb)));
   }
 
+  // In marked, a link text containing a code span whose content itself
+  // contains a backtick (a "dirty" span) only forms when the text ends
+  // with such a span.
+  function linkTextOk(s) {
+    let p = 0;
+    let anyDirty = false;
+    let endsDirty = false;
+    while (p < s.length) {
+      if (s[p] === '\\' && isAsciiPunct(s[p + 1])) { p += 2; continue; }
+      if (s[p] !== '`') { p++; continue; }
+      let len = 0;
+      while (s[p + len] === '`') len++;
+      let q = p + len;
+      let closeAt = -1;
+      while (q < s.length) {
+        if (s[q] === '`') {
+          let run = 0;
+          while (s[q + run] === '`') run++;
+          if (run === len) { closeAt = q; break; }
+          q += run;
+        } else q++;
+      }
+      if (closeAt < 0) { p += len; continue; }
+      if (s.slice(p + len, closeAt).includes('`')) {
+        anyDirty = true;
+        endsDirty = closeAt + len === s.length;
+      }
+      p = closeAt + len;
+    }
+    return !anyDirty || endsDirty;
+  }
+
   function closeBracket() {
     let bi = -1;
     for (let k = brackets.length - 1; k >= 0; k--) {
@@ -581,6 +613,10 @@ function lexInline(src, ctx) {
     }
     if (bi < 0) return false;
     const op = brackets[bi];
+    if (!linkTextOk(src.slice(op.contentStart, i))) {
+      brackets.splice(bi, 1);
+      return false;
+    }
     // inline link: ]( ...)
     if (src[i + 1] === '(') {
       const r = parseLinkParens(src, i + 2);
@@ -754,7 +790,7 @@ function lexInline(src, ctx) {
       // an image captures its text by balanced-bracket scanning, so a
       // link nested inside the alt text cannot close the image early
       const close = scanBalanced(i + 2);
-      if (close >= 0) {
+      if (close >= 0 && linkTextOk(src.slice(i + 2, close))) {
         const textStr = src.slice(i + 2, close);
         let done = false;
         if (src[close + 1] === '(') {
