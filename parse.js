@@ -493,7 +493,18 @@ function processEmphasis(nodes, delims) {
           const u = o.len >= 2 && closer.len >= 2 ? 2 : 1;
           const na = nodes.indexOf(o);
           const nb = nodes.indexOf(closer);
-          if (pairRejectedByMarked(nodes.slice(na + 1, nb), u, o.ch, closer.len)) continue;
+          const innerSlice = nodes.slice(na + 1, nb);
+          if (pairRejectedByMarked(innerSlice, u, o.ch, closer.len)) continue;
+          // a lone closer may not spend half of a double opener whose
+          // span already holds a complete em and can still close as a
+          // strong at a later double closer
+          if (closer.len === 1 && o.len >= 2 && innerSlice.some(nd => nd.k === 'em')) {
+            let laterDouble = false;
+            for (let q = di + 1; q < delims.length; q++) {
+              if (delims[q].ch === closer.ch && delims[q].canClose && delims[q].len >= 2) { laterDouble = true; break; }
+            }
+            if (laterDouble) continue;
+          }
         }
         oi = k; break;
       }
