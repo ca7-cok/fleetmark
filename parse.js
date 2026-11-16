@@ -406,6 +406,57 @@ function flanking(s, start, end) {
 
 /** The CommonMark emphasis-matching algorithm over a node array. `delims` is
  *  the delimiter stack (entries reference nodes). Mutates both. */
+function edgeCharOf(nd, last) {
+  if (!nd) return null;
+  if (nd.k === 't') return nd.s.length ? (last ? nd.s[nd.s.length - 1] : nd.s[0]) : null;
+  if (nd.k === 'delim') return nd.len > 0 ? nd.ch : null;
+  if (nd.k === 'code') return '`';
+  return '';
+}
+
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+// marked's emphasis grammar rejects an em/strong pair whose content holds
+// a nested pair of the other size that starts after whitespace and ends
+// tight against a word character — unless a later delimiter run of the
+// outer character, itself preceded by a word character, rescues it.
+function charBefore(inner, idx) {
+  for (let j = idx - 1; j >= 0; j--) {
+    const c = edgeCharOf(inner[j], true);
+    if (c !== null) return c;
+  }
+  return null;
+}
+
+function charAfter(inner, idx) {
+  for (let j = idx + 1; j < inner.length; j++) {
+    const c = edgeCharOf(inner[j], false);
+    if (c !== null) return c;
+  }
+  return null;
+}
+
+function pairRejectedByMarked(inner, use, ch) {
+  const nestedK = use === 1 ? 'strong' : 'em';
+  for (let idx = 0; idx < inner.length; idx++) {
+    if (inner[idx].k !== nestedK) continue;
+    const prevCh = charBefore(inner, idx);
+    const nextCh = charAfter(inner, idx);
+    const prevBad = prevCh === null || /\s/.test(prevCh);
+    const nextBad = nextCh !== null && WORD_CHAR.test(nextCh);
+    if (!prevBad || !nextBad) continue;
+    let rescued = false;
+    for (let j = idx + 1; j < inner.length; j++) {
+      if (inner[j].k === 'delim' && inner[j].ch === ch && inner[j].len > 0) {
+        const pc = charBefore(inner, j);
+        if (pc !== null && WORD_CHAR.test(pc)) { rescued = true; break; }
+      }
+    }
+    if (!rescued) return true;
+  }
+  return false;
+}
+
 function processEmphasis(nodes, delims) {
   let di = 0;
   while (di < delims.length) {
@@ -424,6 +475,12 @@ function processEmphasis(nodes, delims) {
         if ((o.canClose || closer.canOpen) &&
             (o.len + closer.len) % 3 === 0 &&
             (o.len % 3 !== 0 || closer.len % 3 !== 0)) continue;
+        if (o.ch === '*') {
+          const u = o.len >= 2 && closer.len >= 2 ? 2 : 1;
+          const na = nodes.indexOf(o);
+          const nb = nodes.indexOf(closer);
+          if (pairRejectedByMarked(nodes.slice(na + 1, nb), u, o.ch)) continue;
+        }
         oi = k; break;
       }
       if (oi < 0) break;
