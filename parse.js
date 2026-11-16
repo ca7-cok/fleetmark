@@ -1236,22 +1236,29 @@ function lexList(lines, i, ctx, eolAtEnd) {
   // while a fence is open inside the current item, every following line
   // belongs to the item (and the fence), whatever its indentation
   let openFence = matchFenceStart(cur.lines[0]);
+  // while a fence is open, dedented lines are absorbed only directly
+  // after a consumed content line (a blank line resets that)
+  let fenceAbsorb = false;
   const trackFence = (contentLine) => {
     if (openFence) {
       if (isFenceClose(contentLine, openFence.ch, openFence.len)) openFence = null;
     } else {
       openFence = matchFenceStart(contentLine);
+      fenceAbsorb = false;
     }
   };
   while (j < lines.length) {
     const line = lines[j];
     if (openFence) {
-      if (isBlankLine(line)) { cur.lines.push(''); j++; continue; }
-      const ind0 = indentCols(line);
-      const pushed = ind0 >= cur.contentIndent ? sliceColX(line, cur.contentIndent) : line;
+      if (isBlankLine(line)) { cur.lines.push(''); fenceAbsorb = false; j++; continue; }
+      // a dedented line ends the item (truncating the fence) unless the
+      // fence just consumed a content line on the previous line
+      if (indentCols(line) < cur.contentIndent && !fenceAbsorb) break;
+      const pushed = sliceColX(line, cur.contentIndent);
       cur.lines.push(pushed);
       cur.hasContent = true;
       trackFence(pushed);
+      fenceAbsorb = openFence !== null;
       j++;
       continue;
     }
@@ -1283,6 +1290,7 @@ function lexList(lines, i, ctx, eolAtEnd) {
       cur = newItem(m, pendingBlanks > 0);
       items.push(cur);
       openFence = matchFenceStart(cur.lines[0]);
+      fenceAbsorb = false;
       pendingBlanks = 0; blankStart = -1;
       j++;
       continue;
