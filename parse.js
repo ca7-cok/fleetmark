@@ -904,6 +904,39 @@ function lexInline(src, ctx) {
     return false;
   }
 
+  // Find the ']' that ends the label starting at `from`, following
+  // marked's label grammar: plain characters, escapes, nested brackets
+  // and backtick units (a run, backtick-free content, then a run of any
+  // length). Returns the index of the ']' or -1.
+  function labelEnd(from) {
+    let depth = 0;
+    let j = from;
+    while (j < n) {
+      const cj = src[j];
+      if (cj === '\\' && j + 1 < n) { j += 2; continue; }
+      if (cj === '`') {
+        let len = 0;
+        while (src[j + len] === '`') len++;
+        let k = j + len;
+        while (k < n && src[k] !== '`') k++;
+        if (k >= n) return -1;
+        let run = 0;
+        while (src[k + run] === '`') run++;
+        j = k + run;
+        continue;
+      }
+      if (cj === '[') { depth++; j++; continue; }
+      if (cj === ']') {
+        if (depth === 0) return j;
+        depth--;
+        j++;
+        continue;
+      }
+      j++;
+    }
+    return -1;
+  }
+
   // Find the ']' matching the bracket opened just before `from`, counting
   // nested brackets and skipping escapes, code spans and link destinations.
   function scanBalanced(from) {
@@ -971,6 +1004,17 @@ function lexInline(src, ctx) {
         } else j++;
       }
       if (closeAt >= 0 && brackets.length > 0) {
+        // a span that reaches past the end of the label does not form:
+        // marked's label grammar consumes backtick units, so the ']'
+        // still ends the label and the run stays literal
+        let op = null;
+        for (let k = brackets.length - 1; k >= 0; k--) {
+          if (brackets[k].active) { op = brackets[k]; break; }
+        }
+        if (op) {
+          const le = labelEnd(op.contentStart);
+          if (le >= 0 && closeAt > le) { text += '`'.repeat(len); i += len; continue; }
+        }
         // inside link text: find where the bracket would close
         let bracketEnd = -1;
         let depth = 0;
