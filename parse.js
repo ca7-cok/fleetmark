@@ -586,12 +586,171 @@ function renderNodes(nodes, ctx) {
   return out;
 }
 
+// ------------------------------------------- marked's emphasis dead zones
+// Before emphasis is resolved, marked rewrites the inline source into a
+// masked form and scans for closers there: a sequential pairing scan
+// first locates code spans (an opening backtick run pairs with the next
+// run of the same length, whatever lies between — so a run left over in
+// a link label can pair with a run much later in the paragraph), the
+// backticks inside a pair are hidden, and then links, code spans and
+// html tags in the masked text are blanked out entirely. Delimiter runs
+// inside the blanked regions can never take part in emphasis. The scans
+// below reproduce those blanked regions as "dead zones".
+
+/** The pairing scan: returns `src` with the interior backticks of every
+ *  paired code span (and every escaped punctuation mark) hidden as '+'. */
+function apocMask(src) {
+  const n = src.length;
+  const masked = src.split('');
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    if (c === '\\' && i + 1 < n && isPunctChar(src[i + 1])) {
+      masked[i] = '+';
+      masked[i + 1] = '+';
+      i += 2;
+      continue;
+    }
+    if (c === '`') {
+      let len = 0;
+      while (src[i + len] === '`') len++;
+      let j = i + len;
+      let closeEnd = -1;
+      while (j < n) {
+        if (src[j] === '`') {
+          let run = 0;
+          while (src[j + run] === '`') run++;
+          if (run === len) { closeEnd = j + run; break; }
+          j += run;
+        } else j++;
+      }
+      if (closeEnd >= 0) {
+        for (let k = i + len; k < closeEnd - len; k++) {
+          if (masked[k] === '`') masked[k] = '+';
+        }
+        i = closeEnd;
+      } else {
+        i += len;
+      }
+      continue;
+    }
+    i++;
+  }
+  return masked.join('');
+}
+
+/** A code span in the masked text: a backtick run, backtick-free
+ *  content, and a closing run of exactly the same length. Returns the
+ *  end index or -1. */
+function matchMaskedCodeSpan(s, i) {
+  const n = s.length;
+  let len = 0;
+  while (s[i + len] === '`') len++;
+  let j = i + len;
+  if (j >= n || s[j] === '`') return -1;
+  while (j < n && s[j] !== '`') j++;
+  if (j >= n) return -1;
+  let run = 0;
+  while (s[j + run] === '`') run++;
+  return run === len ? j + run : -1;
+}
+
+/** A link in the masked text, with the loose destination grammar of
+ *  the mask (escapes, ordinary characters and one level of balanced
+ *  parentheses; the label holds plain characters and code spans).
+ *  Returns the end index or -1. */
+function matchMaskedLink(s, i) {
+  const n = s.length;
+  let j = i + 1;
+  for (;;) {
+    if (j >= n) return -1;
+    const c = s[j];
+    if (c === ']') { j++; break; }
+    if (c === '[') return -1;
+    if (c === '`') {
+      const end = matchMaskedCodeSpan(s, j);
+      if (end < 0) return -1;
+      j = end;
+      continue;
+    }
+    j++;
+  }
+  if (s[j] !== '(') return -1;
+  j++;
+  while (j < n) {
+    const c = s[j];
+    if (c === ')') return j + 1;
+    if (c === '\\') { j += 2; continue; }
+    if (c === '(') {
+      let k = j + 1;
+      let closed = false;
+      while (k < n) {
+        if (s[k] === '\\') { k += 2; continue; }
+        if (s[k] === '(') return -1;
+        if (s[k] === ')') { closed = true; break; }
+        k++;
+      }
+      if (!closed) return -1;
+      j = k + 1;
+      continue;
+    }
+    j++;
+  }
+  return -1;
+}
+
+/** The blanked regions of `src`, as sorted [start, end) intervals. */
+function computeDeadZones(src) {
+  const s = apocMask(src);
+  const n = s.length;
+  const zones = [];
+  let i = 0;
+  while (i < n) {
+    const c = s[i];
+    if (c === '[') {
+      const end = matchMaskedLink(s, i);
+      if (end > 0) { zones.push([i, end]); i = end; continue; }
+      i++;
+      continue;
+    }
+    if (c === '`') {
+      const end = matchMaskedCodeSpan(s, i);
+      if (end > 0) { zones.push([i, end]); i = end; continue; }
+      let len = 0;
+      while (s[i + len] === '`') len++;
+      i += len;
+      continue;
+    }
+    if (c === '<' && s[i + 1] !== ' ') {
+      let j = i + 1;
+      while (j < n && s[j] !== '>' && s[j] !== '<') j++;
+      if (j < n && s[j] === '>') { zones.push([i, j + 1]); i = j + 1; continue; }
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return zones;
+}
+
+/** Is `pos` inside one of the sorted, non-overlapping zones? */
+function zoneHas(zones, pos) {
+  let lo = 0, hi = zones.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (zones[mid][1] <= pos) lo = mid + 1; else hi = mid;
+  }
+  return lo < zones.length && zones[lo][0] <= pos;
+}
+
 /** Lex inline markup in `src` into a node list. `ctx.defs` maps
  *  normalized reference labels to {dest, title}. */
 function lexInline(src, ctx) {
   const nodes = [];
   const delims = [];
   const brackets = [];
+  const deadZones = computeDeadZones(src);
+  const inDeadZone = (pos) => zoneHas(deadZones, pos);
   let text = '';
   let i = 0;
   const n = src.length;
@@ -611,8 +770,23 @@ function lexInline(src, ctx) {
     const opIdx = nodes.indexOf(op.node);
     const kids = nodes.splice(opIdx + 1);
     nodes.pop(); // the opener node itself
-    // emphasis inside the link text is resolved among itself
+    // emphasis inside the link text is resolved among itself; the
+    // delimiters are judged against the dead zones of the link text
+    // alone, as in marked's nested parse of the label
     const kidDelims = delims.filter(d => kids.includes(d));
+    if (kidDelims.length) {
+      const labelZones = computeDeadZones(src.slice(op.contentStart, i));
+      if (labelZones.length) {
+        for (let k = kidDelims.length - 1; k >= 0; k--) {
+          const d = kidDelims[k];
+          if (!zoneHas(labelZones, d.pos - op.contentStart)) continue;
+          kidDelims.splice(k, 1);
+          const at = delims.indexOf(d);
+          if (at >= 0) delims.splice(at, 1);
+          d.k = 't'; d.s = d.ch.repeat(d.len);
+        }
+      }
+    }
     if (kidDelims.length) {
       processEmphasis(kids, kidDelims);
       for (const d of kidDelims) {
@@ -929,7 +1103,7 @@ function lexInline(src, ctx) {
       flushText();
       const [left, right] = flanking(src, i, i + len);
       const node = {
-        k: 'delim', ch: c, len,
+        k: 'delim', ch: c, len, pos: i,
         canOpen: c === '*' ? left : (left && (!right || isPunctChar(src[i - 1]))),
         canClose: c === '*' ? right : (right && (!left || isPunctChar(src[i + len]))),
       };
@@ -944,7 +1118,7 @@ function lexInline(src, ctx) {
       if (len > 2) { text += '~'.repeat(len); i += len; continue; }
       flushText();
       const [left, right] = flanking(src, i, i + len);
-      const node = { k: 'delim', ch: '~', len, canOpen: left, canClose: right };
+      const node = { k: 'delim', ch: '~', len, pos: i, canOpen: left, canClose: right };
       nodes.push(node);
       delims.push(node);
       i += len;
@@ -989,6 +1163,16 @@ function lexInline(src, ctx) {
     i = j;
   }
   flushText();
+  // delimiter runs inside a dead zone are literal text
+  if (deadZones.length) {
+    for (let k = delims.length - 1; k >= 0; k--) {
+      const d = delims[k];
+      if (inDeadZone(d.pos)) {
+        delims.splice(k, 1);
+        d.k = 't'; d.s = d.ch.repeat(d.len);
+      }
+    }
+  }
   processEmphasis(nodes, delims);
   return nodes;
 }
