@@ -78,7 +78,27 @@ function indentCols(line) {
 
 /** The substring of `line` starting at visual column `target`; a tab that
  *  straddles the target is replaced by the spaces past it. */
+/** Remove up to `target` columns of leading indentation, keeping the rest
+ *  of the line byte-for-byte (a straddling tab leaves spaces behind). Used
+ *  for literal content: code blocks and fence bodies. */
 function sliceCol(line, target) {
+  let col = 0, i = 0;
+  while (i < line.length && col < target) {
+    const c = line[i];
+    if (c === ' ') { col++; i++; }
+    else if (c === '\t') {
+      const step = 4 - (col % 4);
+      if (col + step > target) return ' '.repeat(col + step - target) + line.slice(i + 1);
+      col += step; i++;
+    } else break;
+  }
+  return line.slice(i);
+}
+
+/** Like sliceCol, but the result is re-lexed as block content, so the
+ *  leading whitespace is expanded to spaces on the original column grid:
+ *  tabs keep the width they had before the slice. */
+function sliceColX(line, target) {
   let col = 0, i = 0;
   while (i < line.length && col < target) {
     const c = line[i];
@@ -318,8 +338,10 @@ function parseEmailAt(s, i) {
 /** Try a GFM autolink literal at position i. Returns {href, text, end}. */
 function matchAutolinkLiteral(s, i) {
   const prev = i === 0 ? undefined : s[i - 1];
-  // www. and http(s):// links
-  if (s.startsWith('www.', i) || s.startsWith('http://', i) || s.startsWith('https://', i)) {
+  // www. and http(s):// links (the scheme matches case-insensitively,
+  // and the original case is preserved in the output)
+  const head8 = s.slice(i, i + 8).toLowerCase();
+  if (s.startsWith('www.', i) || head8.startsWith('http://') || head8.startsWith('https://')) {
     if (prev !== undefined && /[A-Za-z0-9]/.test(prev)) return null;
     let j = i;
     while (j < s.length && !/[\s<]/.test(s[j]) && s[j] >= ' ') j++;
@@ -360,7 +382,7 @@ function matchAutolinkLiteral(s, i) {
   return null;
 }
 
-const TEXT_STOP_RE = /[\\`\[!<&*_~\n\]]|www\.|https?:\/\/|mailto:|xmpp:|[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@/g;
+const TEXT_STOP_RE = /[\\`\[!<&*_~\n\]]|www\.|[Hh][Tt][Tt][Pp][Ss]?:\/\/|mailto:|xmpp:|[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@/g;
 
 function flanking(s, start, end) {
   const before = start === 0 ? undefined : s[start - 1];
@@ -518,6 +540,24 @@ function parseInline(src, ctx) {
       if (nd.k === 'link' && nd.auto) list[k] = { k: 't', s: nd.autoText };
       else if (nd.kids) demoteAutolinks(nd.kids);
     }
+  }
+
+  // Would a ']' at position rb form a link with the nearest active opener?
+  function wouldFormLink(rb) {
+    let op = null;
+    for (let k = brackets.length - 1; k >= 0; k--) {
+      if (brackets[k].active) { op = brackets[k]; break; }
+    }
+    if (!op) return false;
+    if (src[rb + 1] === '(') return parseLinkParens(src, rb + 2) !== null;
+    if (src[rb + 1] === '[') {
+      const second = parseRefLabel(src, rb + 1);
+      if (second) {
+        const label = second.text !== '' ? second.text : src.slice(op.contentStart, rb);
+        return ctx.defs.has(normalizeLabel(label));
+      }
+    }
+    return ctx.defs.has(normalizeLabel(src.slice(op.contentStart, rb)));
   }
 
   function closeBracket() {
@@ -680,7 +720,11 @@ function parseInline(src, ctx) {
     const mm = TEXT_STOP_RE.exec(src);
     const j = mm ? mm.index : n;
     if (j === i) {
-      const auto = matchAutolinkLiteral(src, i);
+      let auto = matchAutolinkLiteral(src, i);
+      if (auto && brackets.length) {
+        const rb = src.indexOf(']', i);
+        if (rb >= i && rb < auto.end && wouldFormLink(rb)) auto = null;
+      }
       if (auto) {
         flushText();
         nodes.push({ k: 'link', href: auto.href, title: null, auto: true, autoText: auto.text, kids: [{ k: 't', s: auto.text }] });
@@ -980,8 +1024,10 @@ function splitRow(line) {
   let i = 0;
   while (i < line.length) {
     const c = line[i];
-    if (c === '\\' && (line[i + 1] === '|' || line[i + 1] === '\\')) {
-      cur += c + line[i + 1];
+    if (c === '\\' && isAsciiPunct(line[i + 1])) {
+      // an escaped pipe becomes a literal pipe in the cell text; other
+      // escape pairs pass through untouched (and never toggle code state)
+      cur += line[i + 1] === '|' ? '|' : c + line[i + 1];
       i += 2;
       continue;
     }
@@ -1013,10 +1059,14 @@ function isTableDelim(line) {
 }
 
 function tableRowStops(line) {
-  if (isBlankLine(line)) return true;
+  // a line of only spaces ends the table; a tab-only line is an empty row
+  if (/^ *$/.test(line)) return true;
   const [pos, col] = scanIndent(line, 3);
   if (col <= 3 && line[pos] === '>') return true;
   if (matchAtx(line) || matchFenceStart(line) || isHr(line)) return true;
+  if (parseMarker(line)) return true;
+  const hb = htmlBlockStart(line);
+  if (hb && hb.type !== 7) return true;
   return false;
 }
 
@@ -1119,8 +1169,28 @@ function lexList(lines, i, ctx, eolAtEnd) {
   let j = i + 1;
   let pendingBlanks = 0;
   let blankStart = -1;
+  // while a fence is open inside the current item, every following line
+  // belongs to the item (and the fence), whatever its indentation
+  let openFence = matchFenceStart(cur.lines[0]);
+  const trackFence = (contentLine) => {
+    if (openFence) {
+      if (isFenceClose(contentLine, openFence.ch, openFence.len)) openFence = null;
+    } else {
+      openFence = matchFenceStart(contentLine);
+    }
+  };
   while (j < lines.length) {
     const line = lines[j];
+    if (openFence) {
+      if (isBlankLine(line)) { cur.lines.push(''); j++; continue; }
+      const ind0 = indentCols(line);
+      const pushed = ind0 >= cur.contentIndent ? sliceColX(line, cur.contentIndent) : line;
+      cur.lines.push(pushed);
+      cur.hasContent = true;
+      trackFence(pushed);
+      j++;
+      continue;
+    }
     if (isBlankLine(line)) {
       if (pendingBlanks === 0) blankStart = j;
       pendingBlanks++;
@@ -1136,8 +1206,10 @@ function lexList(lines, i, ctx, eolAtEnd) {
         cur.lines.push(''); // a run of blank lines collapses to one
         pendingBlanks = 0; blankStart = -1;
       }
-      cur.lines.push(sliceCol(line, cur.contentIndent));
+      const pushedLine = sliceColX(line, cur.contentIndent);
+      cur.lines.push(pushedLine);
       cur.hasContent = true;
+      trackFence(pushedLine);
       j++;
       continue;
     }
@@ -1146,12 +1218,13 @@ function lexList(lines, i, ctx, eolAtEnd) {
     if (m && sameListType(first, m)) {
       cur = newItem(m, pendingBlanks > 0);
       items.push(cur);
+      openFence = matchFenceStart(cur.lines[0]);
       pendingBlanks = 0; blankStart = -1;
       j++;
       continue;
     }
     if (pendingBlanks === 0 && cur.lines.length > 0 && !startsInterruptBlock(line)) {
-      const toks = lexLines(cur.lines, ctx, false);
+      const toks = lexLines(cur.lines, ctx, false, true);
       if (lastIsPara(toks)) {
         cur.lines[cur.lines.length - 1] += '\n' + line.replace(/^[ \t]+/, '');
         cur.hasContent = true;
@@ -1165,7 +1238,7 @@ function lexList(lines, i, ctx, eolAtEnd) {
   // build items and decide tightness
   let loose = false;
   const builtItems = items.map((it, idx) => {
-    const tokens = lexLines(it.lines, ctx, false);
+    const tokens = lexLines(it.lines, ctx, false, true);
     if (idx > 0 && it.blankBefore) loose = true;
     for (let t = 1; t < tokens.length; t++) if (tokens[t].blankBefore) loose = true;
     return { tokens };
@@ -1173,18 +1246,20 @@ function lexList(lines, i, ctx, eolAtEnd) {
   return [{ type: 'list', ordered: first.ordered, start: first.start, tight: !loose, items: builtItems }, j];
 }
 
-function interruptsParagraph(line) {
+function interruptsParagraph(line, inItem) {
   if (matchAtx(line) || matchFenceStart(line) || isHr(line)) return true;
   const [pos, col] = scanIndent(line, 3);
   if (col <= 3 && line[pos] === '>') return true;
   const hb = htmlBlockStart(line);
   if (hb && hb.type !== 7) return true;
   const m = parseMarker(line);
-  if (m && m.firstContent.trim() !== '' && (!m.ordered || m.start === 1)) return true;
+  // an ordered marker only interrupts a paragraph when it starts at 1,
+  // except inside a list item, where any ordered marker interrupts
+  if (m && m.firstContent.trim() !== '' && (!m.ordered || m.start === 1 || inItem)) return true;
   return false;
 }
 
-function lexLines(lines, ctx, eolAtEnd) {
+function lexLines(lines, ctx, eolAtEnd, inItem = false) {
   const tokens = [];
   let i = 0;
   let blankBefore = false;
@@ -1203,6 +1278,8 @@ function lexLines(lines, ctx, eolAtEnd) {
         j++;
       }
       if (j < n) j++; // consume the closing fence
+      // a blank line directly before the closing fence is not content
+      if (content.length && content[content.length - 1] === '') content.pop();
       res = [{ type: 'code', lang: fence.info ? unescapeStr(fence.info.split(/\s+/)[0]) : null, text: content.length ? content.join('\n') + '\n' : '' }, j];
     }
     // ATX heading
@@ -1263,7 +1340,7 @@ function lexLines(lines, ctx, eolAtEnd) {
         if (isBlankLine(l)) break;
         const sx = setextLevel(l);
         if (sx) { heading = sx; j++; break; }
-        if (interruptsParagraph(l)) break;
+        if (interruptsParagraph(l, inItem)) break;
         buf.push(l);
         j++;
       }
@@ -1340,23 +1417,32 @@ function renderBlock(tok, ctx, tightPara) {
 const TASK_RE = /^\[( |x|X)\] /;
 
 function renderItem(item, tight, ctx) {
-  let toks = item.tokens;
-  let prefix = '';
+  const toks = item.tokens;
+  let first = -1; // index of the first token if it carries a task marker
+  let box = '';
+  let restText = null;
   if (toks.length && toks[0].type === 'para') {
     const text = toks[0].text;
     const m = TASK_RE.exec(text);
-    if (m) {
-      const checked = m[1] !== ' ';
-      prefix = '<input ' + (checked ? 'checked="" ' : '') + 'disabled="" type="checkbox"> ';
-      toks = [{ ...toks[0], text: text.slice(4) }, ...toks.slice(1)];
-    } else if (text === '[ ]' || text === '[x]' || text === '[X]') {
-      const checked = text[1] !== ' ';
-      prefix = '<input ' + (checked ? 'checked="" ' : '') + 'disabled="" type="checkbox">';
-      toks = [{ ...toks[0], text: '' }, ...toks.slice(1)];
+    if (m || text === '[ ]' || text === '[x]' || text === '[X]') {
+      const checked = m ? m[1] !== ' ' : text[1] !== ' ';
+      box = '<input ' + (checked ? 'checked="" ' : '') + 'disabled="" type="checkbox">' + (m ? ' ' : '');
+      restText = m ? text.slice(4) : '';
+      first = 0;
     }
   }
-  let out = prefix;
-  for (const t of toks) out += renderBlock(t, ctx, tight);
+  let out = '';
+  for (let k = 0; k < toks.length; k++) {
+    if (k === first) {
+      // the checkbox leads the paragraph: inside the <p> for loose lists,
+      // bare for tight ones
+      out += tight
+        ? box + parseInline(restText, ctx)
+        : '<p>' + box + parseInline(restText, ctx) + '</p>\n';
+    } else {
+      out += renderBlock(toks[k], ctx, tight);
+    }
+  }
   return out;
 }
 
