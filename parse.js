@@ -332,11 +332,9 @@ function parseEmailAt(s, i, delims) {
   const next = s[j];
   if (next !== undefined && /[A-Za-z0-9-]/.test(next)) return -1;
   if (next === '_') {
-    // a run of 2+ underscores can be an emphasis boundary instead of part
+    // a trailing underscore can be an emphasis boundary instead of part
     // of the address, but only when a '_' delimiter is actually open
-    let run = 0;
-    while (s[j + run] === '_') run++;
-    if (run < 2 || !delims || !delims.some(d => d.ch === '_')) return -1;
+    if (!delims || !delims.some(d => d.ch === '_' && d.canOpen)) return -1;
   }
   return j;
 }
