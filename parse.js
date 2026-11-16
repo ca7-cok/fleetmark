@@ -408,11 +408,15 @@ function processEmphasis(nodes, delims) {
     const closer = delims[di];
     if (!closer.canClose || closer.len === 0) { di++; continue; }
     let advanced = false;
+    const usedOpeners = [];
     while (closer.len > 0) {
       let oi = -1;
       for (let k = di - 1; k >= 0; k--) {
         const o = delims[k];
         if (o.ch !== closer.ch || !o.canOpen || o.len === 0) continue;
+        // a spent opener may still pair with a pure closer, just not
+        // with a delimiter that can also open
+        if (o.dead && closer.canOpen) continue;
         if ((o.canClose || closer.canOpen) &&
             (o.len + closer.len) % 3 === 0 &&
             (o.len % 3 !== 0 || closer.len % 3 !== 0)) continue;
@@ -420,6 +424,7 @@ function processEmphasis(nodes, delims) {
       }
       if (oi < 0) break;
       const opener = delims[oi];
+      usedOpeners.push(opener);
       const use = opener.ch === '~'
         ? Math.min(2, opener.len, closer.len)
         : (opener.len >= 2 && closer.len >= 2 ? 2 : 1);
@@ -435,6 +440,9 @@ function processEmphasis(nodes, delims) {
       if (opener.len === 0) { delims.splice(oi, 1); di--; }
       advanced = true;
     }
+    // an opener left partially consumed by this closer is spent: a
+    // later closer may not reuse its remaining delimiters
+    for (const o of usedOpeners) if (o.len > 0) o.dead = true;
     if (!advanced) di++;
     else if (closer.len === 0) di++;
   }
