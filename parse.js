@@ -1595,7 +1595,11 @@ function lexBlockquote(lines, i, ctx, eolAtEnd) {
     if (inner.length > 0 && inner[inner.length - 1] !== '' && !startsInterruptBlock(line)) {
       const toks = lexLines(inner, ctx, false);
       if (lastIsPara(toks)) {
-        inner[inner.length - 1] += '\n' + (indentCols(line) >= 4 ? sliceColX(line, 4) : line);
+        // marked gives a lazy setext-shaped line four spaces of indent,
+        // which keeps it as literal paragraph text (cm-093)
+        const sxm = /^ {0,3}((?:=+|-+)[ \t]*)$/.exec(line);
+        inner[inner.length - 1] += '\n' + (sxm ? '    ' + sxm[1]
+          : (indentCols(line) >= 4 ? sliceColX(line, 4) : line));
         j++;
         continue;
       }
