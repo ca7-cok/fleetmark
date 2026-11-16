@@ -261,10 +261,10 @@ const EMAIL_AUTOLINK_RE = /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a
 function matchRawHtml(s, i) {
   const rest = s.slice(i);
   if (rest.startsWith('<!--')) {
+    if (rest.startsWith('<!-->')) return '<!-->';
+    if (rest.startsWith('<!--->')) return '<!--->';
     const end = rest.indexOf('-->', 4);
     if (end < 0) return null;
-    const body = rest.slice(4, end);
-    if (body.startsWith('>') || body.startsWith('->') || body.endsWith('-') || body.includes('--')) return null;
     return rest.slice(0, end + 3);
   }
   if (rest.startsWith('<?')) {
@@ -331,7 +331,7 @@ function parseEmailAt(s, i) {
   }
   if (labels < 2) return -1;
   const next = s[j];
-  if (next !== undefined && /[A-Za-z0-9_]/.test(next)) return -1;
+  if (next !== undefined && /[A-Za-z0-9_-]/.test(next)) return -1;
   return j;
 }
 
@@ -770,8 +770,7 @@ function matchAtx(line) {
   let rest = m[2];
   if (rest !== '' && rest[0] !== ' ' && rest[0] !== '\t') return null;
   rest = rest.replace(/[ \t]+$/, '');
-  rest = rest.replace(/[ \t]#+$/, '');
-  if (/^[ \t]*#+[ \t]*$/.test(rest)) rest = '';
+  rest = rest.replace(/(?:[ \t]+|^)#+$/, '');
   rest = rest.replace(/^[ \t]+/, '');
   return { level: m[1].length, text: rest };
 }
@@ -1150,6 +1149,10 @@ function lexBlockquote(lines, i, ctx, eolAtEnd) {
     }
     break;
   }
+  if (inner.length >= 2 && inner[inner.length - 1].trim() === '' && inner[inner.length - 1] !== '' && inner[inner.length - 2] !== '') {
+    inner[inner.length - 2] += '\n' + inner[inner.length - 1];
+    inner.pop();
+  }
   return [{ type: 'blockquote', children: lexLines(inner, ctx, false) }, j];
 }
 
@@ -1203,7 +1206,7 @@ function lexList(lines, i, ctx, eolAtEnd) {
       // is finished: the following lines are not part of it
       if (pendingBlanks > 0 && cur.startedEmpty && !cur.hasContent) { j = blankStart; break; }
       if (pendingBlanks > 0) {
-        cur.lines.push(''); // a run of blank lines collapses to one
+        for (let b = 0; b < pendingBlanks; b++) cur.lines.push('');
         pendingBlanks = 0; blankStart = -1;
       }
       const pushedLine = sliceColX(line, cur.contentIndent);
@@ -1215,7 +1218,7 @@ function lexList(lines, i, ctx, eolAtEnd) {
     }
     // below the content indent: sibling marker, or the list ends
     const m = parseMarker(line);
-    if (m && sameListType(first, m)) {
+    if (m && sameListType(first, m) && !isHr(line)) {
       cur = newItem(m, pendingBlanks > 0);
       items.push(cur);
       openFence = matchFenceStart(cur.lines[0]);
@@ -1308,7 +1311,7 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
         }
         const consumed = lines.slice(i, j);
         let text = consumed.join('\n');
-        if (j >= n && eolAtEnd) text += '\n';
+        if ((j < n && !isBlankLine(lines[j])) || (j >= n && eolAtEnd)) text += '\n';
         res = [{ type: 'html', text }, j];
       }
     }
@@ -1324,10 +1327,10 @@ function lexLines(lines, ctx, eolAtEnd, inItem = false) {
       const content = [];
       let j = i;
       while (j < n && (isBlankLine(lines[j]) || indentCols(lines[j]) >= 4)) {
-        content.push(isBlankLine(lines[j]) ? '' : sliceCol(lines[j], 4));
+        content.push(indentCols(lines[j]) >= 4 ? sliceCol(lines[j], 4) : '');
         j++;
       }
-      while (content.length && content[content.length - 1] === '') content.pop();
+      while (content.length && content[content.length - 1].trim() === '') content.pop();
       res = [{ type: 'code', lang: null, text: content.length ? content.join('\n') + '\n' : '' }, j];
     }
     // paragraph (with setext conversion)
