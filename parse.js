@@ -1050,10 +1050,13 @@ function splitRow(line) {
       let run = 0;
       while (line[i + run] === '`') run++;
       // a span only shields pipes when a run of exactly the same length
-      // closes it later in the row; otherwise the backticks are literal
+      // closes it before the next unescaped pipe; otherwise the
+      // backticks are literal and the pipe still splits
       let j = i + run;
       let closeEnd = -1;
       while (j < line.length) {
+        if (line[j] === '\\' && isAsciiPunct(line[j + 1])) { j += 2; continue; }
+        if (line[j] === '|') break;
         if (line[j] === '`') {
           let r2 = 0;
           while (line[j + r2] === '`') r2++;
@@ -1169,7 +1172,7 @@ function lexBlockquote(lines, i, ctx, eolAtEnd) {
     if (inner.length > 0 && inner[inner.length - 1] !== '' && !startsInterruptBlock(line)) {
       const toks = lexLines(inner, ctx, false);
       if (lastIsPara(toks)) {
-        inner[inner.length - 1] += '\n' + line.replace(/^[ \t]+/, '');
+        inner[inner.length - 1] += '\n' + (indentCols(line) >= 4 ? sliceColX(line, 4) : line);
         j++;
         continue;
       }
@@ -1256,7 +1259,7 @@ function lexList(lines, i, ctx, eolAtEnd) {
     if (pendingBlanks === 0 && cur.lines.length > 0 && !startsInterruptBlock(line)) {
       const toks = lexLines(cur.lines, ctx, false, true);
       if (lastIsPara(toks)) {
-        cur.lines[cur.lines.length - 1] += '\n' + line.replace(/^[ \t]+/, '');
+        cur.lines[cur.lines.length - 1] += '\n' + (indentCols(line) >= 4 ? sliceColX(line, 4) : line);
         cur.hasContent = true;
         j++;
         continue;
